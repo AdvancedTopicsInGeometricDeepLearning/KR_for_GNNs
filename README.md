@@ -61,7 +61,7 @@ contains everything now and this is just an old folder.
 `./graph_self_supervised_learning` contains the code and the tests
 for the results for the self supervised learning on the graph.
 
-# GIRL
+## GIRL
 
 Since we are only interested in GIRL, we only focused on the code
 that is under `./graph_self_supervised_learning`, refer to the 
