@@ -53,8 +53,10 @@ if you don't run each one from its own path.
 
 `./images` contains an image for this readme.
 
-`./graph_supervised_learning` contains the code and the tests for
-the results for supervised learning in the paper.
+`./graph_supervised_learning` we assume it once contained the code
+and the tests for the results for supervised learning in the paper.
+However it looks as if `./graph_self_supervised_learning` 
+contains everything now and this is just an old folder.
 
 `./graph_self_supervised_learning` contains the code and the tests
 for the results for the self supervised learning on the graph.
