@@ -41,6 +41,7 @@ pip install wandb
 pip install ogb
 pip install seaborn
 conda install -c pytorch -c nvidia faiss-gpu
+pip install tensorboard
 ```
 
 ## File structure
