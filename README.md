@@ -59,7 +59,7 @@ However it looks as if `./graph_self_supervised_learning`
 contains everything now and this is just an old folder.
 
 `./graph_self_supervised_learning` contains the code and the tests
-for the results for the self supervised learning on the graph.
+for all the results in the paper.
 
 ## GIRL
 
