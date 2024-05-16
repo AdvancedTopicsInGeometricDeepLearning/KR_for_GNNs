@@ -17,3 +17,16 @@ for self-supervised graph representation learning. The main idea behind algorith
 ![](images/GIRL.png?raw=true)
 
 
+## Notes
+
+To install prerequisites please run:
+
+```commandline
+pip install hydra-core
+pip install lightning
+pip install torch_geometric
+pip install wandb
+pip install ogb
+pip install seaborn
+conda install -c pytorch -c nvidia faiss-gpu
+```
