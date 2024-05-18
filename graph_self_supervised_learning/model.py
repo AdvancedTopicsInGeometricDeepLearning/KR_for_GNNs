@@ -314,16 +314,21 @@ class ExpModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx, dataloader_idx):
         if self.phase == EModelPhase.TRAIN_CLASSIFIER and self.cfg.dataset.pre_calculate_embeddings:
             lvl_loss, global_loss, out, y = self.forward_only_classifier(x=batch[0], y=batch[1])
-            self.validation_step_outputs.append((out, y, lvl_loss, global_loss))
-            return out, y, lvl_loss, global_loss
         else:
             if hasattr(batch, "root_nodes"):
                 criterion_mask = batch.root_nodes
             else:
                 criterion_mask = torch.ones_like(batch.train_mask)
             lvl_loss, global_loss, out, y = self.forward(data=batch, criterion_mask=criterion_mask, compute_loss=True)
-            self.validation_step_outputs.append((out, y, lvl_loss, global_loss))
-            return out, y, lvl_loss, global_loss
+        result = {
+            "lvl_loss": lvl_loss,
+            "global_loss": global_loss,
+            "out": out,
+            "y": y,
+            "loss": global_loss
+        }
+        self.validation_step_outputs.append(result)
+        return result
 
 
     def log_confusion_matrix(self, pred, target, split_name, lvl):
@@ -356,121 +361,144 @@ class ExpModel(pl.LightningModule):
         plt.close('all')
 
     def on_validation_epoch_end(self):
+        # print()
+        # print("******************************* on_validation_epoch_end *********************")
         validation_step_outputs = self.validation_step_outputs
         self.validation_step_outputs = []
         self._knn_classifier = None
         conc_val_outputs = []
-        for out, y, lvl_loss, global_loss in validation_step_outputs:
-            out_conc = []
-            lvl_loss_conc = []
+        for validation_step_dict in validation_step_outputs:
+            # extract information from validation step
+            lvl_loss = validation_step_dict["lvl_loss"]
+            global_loss = validation_step_dict["global_loss"]
+            out = validation_step_dict["out"]
+            y = validation_step_dict["y"]
+
+            # print()
+            # print("###########################")
+            # print(f"out = {out}")
+            # print(f"y = {y}")
+            # print(f"lvl_loss = {lvl_loss}")
+            # print(f"global_loss = {global_loss}")
+
+            # for each node in the graph, represent the changes of the features on that node.
+            features_per_layer_per_node = []
+            assert len(out[0]) == out[0].shape[0]
             for i in range(len(out[0])):
-                out_conc.append(torch.concat([o[i] for o in out]).cpu().numpy())
-                curr_lvl_loss = [l for l in lvl_loss if l is not None]
-                if curr_lvl_loss[0] is None:
-                    curr_lvl_loss = None
-                else:
-                    curr_lvl_loss = [cll for cll in curr_lvl_loss if cll is not None]
-                    curr_lvl_loss = float(torch.mean(torch.stack(curr_lvl_loss).flatten()).cpu().numpy())
-                lvl_loss_conc.append(curr_lvl_loss)
-            out = out_conc
-            lvl_loss = lvl_loss_conc
-            y = y.cpu().numpy()
-            # global_loss = [g for g in global_loss if isinstance(g, torch.Tensor)]
-            global_loss = float(torch.mean(global_loss.flatten()).cpu().numpy())
-            conc_val_outputs.append((out, y, lvl_loss, global_loss))
+                features_per_layer_per_node.append(torch.concat([o[i] for o in out]).cpu().numpy())
 
-        for split_name, split_res in (("train", conc_val_outputs[0]), ("val", conc_val_outputs[1]), ("test", conc_val_outputs[2])):
-            split_out, split_y, split_lvl_loss, split_global_loss = split_res
-            self.log(f"{split_name}_loss/loss", split_global_loss)
-            preds = [None] * len(split_lvl_loss)
-            if self.phase == EModelPhase.TRAIN_EMBEDDING:
-                if split_name == "train":
-                    gpu_idx = int(self.cfg.enviroment.device.split("cuda:")[1] if "cuda" in self.cfg.enviroment.device else -1)
-                    self._knn_classifier = [KNNFaiss(k=5, gpu_idx=gpu_idx) for i in range(len(split_out))]
-                idx_to_take = None
-                if split_out[0].shape[0] > self.cfg.training.max_samples_for_evaluation:
-                    idx_to_take = torch.randperm(split_out[0].shape[0])[:self.cfg.training.max_samples_for_evaluation]
-                    split_y = split_y[idx_to_take]
-                for i, lvl_out in enumerate(split_out):
-                    if idx_to_take is not None:
-                        lvl_out = lvl_out[idx_to_take]
+            # convert other things to cpu
+            loss_per_level = [float(x.cpu().numpy()) if x is not None else x for x in lvl_loss]
+            y_cpu = y.cpu().numpy()
+            global_loss_cpu = float(global_loss.item())
+            conc_val_outputs.append((features_per_layer_per_node, y_cpu, loss_per_level, global_loss_cpu))
+            self.log(f"val_loss/loss", global_loss_cpu)
 
-                    if split_name == "train":
-                        self._knn_classifier[i].fitModel(train_features=lvl_out, train_labels=split_y)
-                    preds[i] = self._knn_classifier[i].predict(test_features=lvl_out)
-            else:  # Final classification, the output is logits
-                if self.cfg.dataset.multi_label_ds:
-                    preds[-1] = (split_out[-1] > 0).astype(np.int)
-                else:
-                    preds[-1] = np.argmax(split_out[-1], axis=-1)
+            # calculate the loss per level
+            # lvl_loss_conc = []
+            # curr_lvl_loss = [l for l in lvl_loss if l is not None]
+            # if curr_lvl_loss[0] is None:
+            #     curr_lvl_loss = None
+            # else:
+            #     curr_lvl_loss = [cll for cll in curr_lvl_loss if cll is not None]
+            #     curr_lvl_loss = float(torch.mean(torch.stack(curr_lvl_loss).flatten()).cpu().numpy())
+            # lvl_loss_conc.append(curr_lvl_loss)
 
-            split_acc = [None] * len(preds)
-            split_f1 = [None] * len(preds)
-            for i, (lvl_loss, lvl_pred) in enumerate(zip(split_lvl_loss, preds)):
-
-                if lvl_loss is not None and lvl_pred is not None:
-                    lvl_acc = np.mean(np.equal(lvl_pred.flatten(), split_y.flatten())) * 100
-                    split_acc[i] = lvl_acc
-                    if self.phase == EModelPhase.TRAIN_CLASSIFIER:
-                        lvl_name = "final"
-                    else:
-                        lvl_name = i
-                    self.log(f"loss_{split_name}/lvl_{lvl_name}", lvl_loss)
-                    self.log(f"accuracy_{split_name}/lvl_{lvl_name}", lvl_acc)
-
-                    if self.out_classes == 2 or self.cfg.dataset.multi_label_ds:
-                        # Compute F1 score
-                        f1s = f1_score(y_true=split_y, y_pred=np.reshape(lvl_pred, split_y.shape), average="micro")
-                        self.log(f"f1_score_{split_name}/lvl_{lvl_name}", f1s)
-                        split_f1[i] = f1s
-
-                    # self.log_confusion_matrix(pred=lvl_pred, target=split_y, split_name=split_name, lvl=i)
-
-                    # if self.out_classes == 2:
-                    #     self.log_roc_auc(pred=lvl_pred, target=split_y, split_name=split_name, lvl=i)
-
-                    self.logger.experiment.add_histogram(f'class_prediction_histogram/lvl_{i}', lvl_pred,
-                                                         self.current_epoch)
-            new_best_val = [False] * len(split_acc)
-            for i, (lvl_acc, lvl_loss, f1s) in enumerate(zip(split_acc, split_lvl_loss, split_f1)):
-                if lvl_loss is None and lvl_acc is None and f1s is None:
-                    continue
-                if self.phase == EModelPhase.TRAIN_CLASSIFIER:
-                    lvl_name = "final"
-                else:
-                    lvl_name = f"{i}"
-                if split_name == "test" and new_best_val[i]:
-                    # Assumption that test is running after val
-                        if lvl_acc is not None:
-                            self._update_best_metric(metric=f"accuracy_{split_name}/lvl_{lvl_name}",
-                                                     value=lvl_acc,
-                                                     type="max",
-                                                     force=True)
-                        if lvl_loss is not None:
-                            self._update_best_metric(metric=f"loss_{split_name}/lvl_{lvl_name}",
-                                                     value=lvl_loss,
-                                                     type="min",
-                                                     force=True)
-
-                        if f1s is not None:
-                            self._update_best_metric(metric=f"f1_score_{split_name}/lvl_{lvl_name}",
-                                                     value=f1s,
-                                                     type="max",
-                                                     force=True)
-                else:
-                    if lvl_loss:
-                        self._update_best_metric(metric=f"loss_{split_name}/lvl_{lvl_name}",
-                                                 value=lvl_loss,
-                                                 type="min")
-                    if lvl_acc is not None:
-                        updated_acc = self._update_best_metric(metric=f"accuracy_{split_name}/lvl_{lvl_name}",
-                                                               value=lvl_acc,
-                                                               type="max")
-                        if split_name == "val" and updated_acc:
-                            new_best_val[i] = True
-                            self.log(f"best_epoch/lvl_{lvl_name}", self.current_epoch)
-
-                    if f1s is not None:
-                        self._update_best_metric(metric=f"f1_score_{split_name}/lvl_{lvl_name}",
-                                                 value=f1s,
-                                                 type="max")
+            # out = out_conc
+            # lvl_loss = lvl_loss_conc
+        #
+        # for split_name, split_res in (("train", conc_val_outputs[0]), ("val", conc_val_outputs[1]), ("test", conc_val_outputs[2])):
+        #     split_out, split_y, split_lvl_loss, split_global_loss = split_res
+        #     self.log(f"{split_name}_loss/loss", split_global_loss)
+        #     preds = [None] * len(split_lvl_loss)
+        #     if self.phase == EModelPhase.TRAIN_EMBEDDING:
+        #         if split_name == "train":
+        #             gpu_idx = int(self.cfg.enviroment.device.split("cuda:")[1] if "cuda" in self.cfg.enviroment.device else -1)
+        #             self._knn_classifier = [KNNFaiss(k=5, gpu_idx=gpu_idx) for i in range(len(split_out))]
+        #         idx_to_take = None
+        #         if split_out[0].shape[0] > self.cfg.training.max_samples_for_evaluation:
+        #             idx_to_take = torch.randperm(split_out[0].shape[0])[:self.cfg.training.max_samples_for_evaluation]
+        #             split_y = split_y[idx_to_take]
+        #         for i, lvl_out in enumerate(split_out):
+        #             if idx_to_take is not None:
+        #                 lvl_out = lvl_out[idx_to_take]
+        #
+        #             if split_name == "train":
+        #                 self._knn_classifier[i].fitModel(train_features=lvl_out, train_labels=split_y)
+        #             preds[i] = self._knn_classifier[i].predict(test_features=lvl_out)
+        #     else:  # Final classification, the output is logits
+        #         if self.cfg.dataset.multi_label_ds:
+        #             preds[-1] = (split_out[-1] > 0).astype(np.int)
+        #         else:
+        #             preds[-1] = np.argmax(split_out[-1], axis=-1)
+        #
+        #     split_acc = [None] * len(preds)
+        #     split_f1 = [None] * len(preds)
+        #     for i, (lvl_loss, lvl_pred) in enumerate(zip(split_lvl_loss, preds)):
+        #
+        #         if lvl_loss is not None and lvl_pred is not None:
+        #             lvl_acc = np.mean(np.equal(lvl_pred.flatten(), split_y.flatten())) * 100
+        #             split_acc[i] = lvl_acc
+        #             if self.phase == EModelPhase.TRAIN_CLASSIFIER:
+        #                 lvl_name = "final"
+        #             else:
+        #                 lvl_name = i
+        #             self.log(f"loss_{split_name}/lvl_{lvl_name}", lvl_loss)
+        #             self.log(f"accuracy_{split_name}/lvl_{lvl_name}", lvl_acc)
+        #
+        #             if self.out_classes == 2 or self.cfg.dataset.multi_label_ds:
+        #                 # Compute F1 score
+        #                 f1s = f1_score(y_true=split_y, y_pred=np.reshape(lvl_pred, split_y.shape), average="micro")
+        #                 self.log(f"f1_score_{split_name}/lvl_{lvl_name}", f1s)
+        #                 split_f1[i] = f1s
+        #
+        #             # self.log_confusion_matrix(pred=lvl_pred, target=split_y, split_name=split_name, lvl=i)
+        #
+        #             # if self.out_classes == 2:
+        #             #     self.log_roc_auc(pred=lvl_pred, target=split_y, split_name=split_name, lvl=i)
+        #
+        #             self.logger.experiment.add_histogram(f'class_prediction_histogram/lvl_{i}', lvl_pred,
+        #                                                  self.current_epoch)
+        #     new_best_val = [False] * len(split_acc)
+        #     for i, (lvl_acc, lvl_loss, f1s) in enumerate(zip(split_acc, split_lvl_loss, split_f1)):
+        #         if lvl_loss is None and lvl_acc is None and f1s is None:
+        #             continue
+        #         if self.phase == EModelPhase.TRAIN_CLASSIFIER:
+        #             lvl_name = "final"
+        #         else:
+        #             lvl_name = f"{i}"
+        #         if split_name == "test" and new_best_val[i]:
+        #             # Assumption that test is running after val
+        #                 if lvl_acc is not None:
+        #                     self._update_best_metric(metric=f"accuracy_{split_name}/lvl_{lvl_name}",
+        #                                              value=lvl_acc,
+        #                                              type="max",
+        #                                              force=True)
+        #                 if lvl_loss is not None:
+        #                     self._update_best_metric(metric=f"loss_{split_name}/lvl_{lvl_name}",
+        #                                              value=lvl_loss,
+        #                                              type="min",
+        #                                              force=True)
+        #
+        #                 if f1s is not None:
+        #                     self._update_best_metric(metric=f"f1_score_{split_name}/lvl_{lvl_name}",
+        #                                              value=f1s,
+        #                                              type="max",
+        #                                              force=True)
+        #         else:
+        #             if lvl_loss:
+        #                 self._update_best_metric(metric=f"loss_{split_name}/lvl_{lvl_name}",
+        #                                          value=lvl_loss,
+        #                                          type="min")
+        #             if lvl_acc is not None:
+        #                 updated_acc = self._update_best_metric(metric=f"accuracy_{split_name}/lvl_{lvl_name}",
+        #                                                        value=lvl_acc,
+        #                                                        type="max")
+        #                 if split_name == "val" and updated_acc:
+        #                     new_best_val[i] = True
+        #                     self.log(f"best_epoch/lvl_{lvl_name}", self.current_epoch)
+        #
+        #             if f1s is not None:
+        #                 self._update_best_metric(metric=f"f1_score_{split_name}/lvl_{lvl_name}",
+        #                                          value=f1s,
+        #                                          type="max")
