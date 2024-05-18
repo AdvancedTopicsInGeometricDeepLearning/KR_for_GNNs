@@ -16,8 +16,8 @@ from sklearn.metrics import RocCurveDisplay, auc, roc_auc_score, roc_curve, conf
 
 from torch_geometric.nn import GCNConv, GATConv, GATv2Conv, SAGEConv, GraphConv
 
-from graph_self_supervised_learning.gaussian_kernel import GaussianKernel
-from graph_self_supervised_learning.knn import KNNFaiss
+from gaussian_kernel import GaussianKernel
+from knn import KNNFaiss
 
 
 class EModelPhase(enum.Enum):
@@ -57,6 +57,7 @@ class ExpModel(pl.LightningModule):
         self._best_metrics_cache = {}
 
         self.automatic_optimization = False
+        self.validation_step_outputs = []
 
     def log(self, *args, **kwargs):
         print(f"{args[0]}: {args[1]:.2f}")
@@ -313,6 +314,7 @@ class ExpModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx, dataloader_idx):
         if self.phase == EModelPhase.TRAIN_CLASSIFIER and self.cfg.dataset.pre_calculate_embeddings:
             lvl_loss, global_loss, out, y = self.forward_only_classifier(x=batch[0], y=batch[1])
+            self.validation_step_outputs.append((out, y, lvl_loss, global_loss))
             return out, y, lvl_loss, global_loss
         else:
             if hasattr(batch, "root_nodes"):
@@ -320,6 +322,7 @@ class ExpModel(pl.LightningModule):
             else:
                 criterion_mask = torch.ones_like(batch.train_mask)
             lvl_loss, global_loss, out, y = self.forward(data=batch, criterion_mask=criterion_mask, compute_loss=True)
+            self.validation_step_outputs.append((out, y, lvl_loss, global_loss))
             return out, y, lvl_loss, global_loss
 
 
@@ -352,16 +355,17 @@ class ExpModel(pl.LightningModule):
         self.log(f"roc_score_{split_name}/lvl_{lvl}", score)
         plt.close('all')
 
-    def validation_epoch_end(self, validation_step_outputs):
+    def on_validation_epoch_end(self):
+        validation_step_outputs = self.validation_step_outputs
+        self.validation_step_outputs = []
         self._knn_classifier = None
         conc_val_outputs = []
-        for curr_outputs in validation_step_outputs:
-            out, y, lvl_loss, global_loss = zip(*curr_outputs)
+        for out, y, lvl_loss, global_loss in validation_step_outputs:
             out_conc = []
             lvl_loss_conc = []
             for i in range(len(out[0])):
                 out_conc.append(torch.concat([o[i] for o in out]).cpu().numpy())
-                curr_lvl_loss = [l[i] for l in lvl_loss if l is not None]
+                curr_lvl_loss = [l for l in lvl_loss if l is not None]
                 if curr_lvl_loss[0] is None:
                     curr_lvl_loss = None
                 else:
@@ -370,9 +374,9 @@ class ExpModel(pl.LightningModule):
                 lvl_loss_conc.append(curr_lvl_loss)
             out = out_conc
             lvl_loss = lvl_loss_conc
-            y = torch.concat(y).cpu().numpy()
-            global_loss = [g for g in global_loss if isinstance(g, torch.Tensor)]
-            global_loss = float(torch.mean(torch.stack(global_loss).flatten()).cpu().numpy())
+            y = y.cpu().numpy()
+            # global_loss = [g for g in global_loss if isinstance(g, torch.Tensor)]
+            global_loss = float(torch.mean(global_loss.flatten()).cpu().numpy())
             conc_val_outputs.append((out, y, lvl_loss, global_loss))
 
         for split_name, split_res in (("train", conc_val_outputs[0]), ("val", conc_val_outputs[1]), ("test", conc_val_outputs[2])):
@@ -381,7 +385,7 @@ class ExpModel(pl.LightningModule):
             preds = [None] * len(split_lvl_loss)
             if self.phase == EModelPhase.TRAIN_EMBEDDING:
                 if split_name == "train":
-                    gpu_idx = int(self.cfg.enviroment.device.split("cuda:")[1])
+                    gpu_idx = int(self.cfg.enviroment.device.split("cuda:")[1] if "cuda" in self.cfg.enviroment.device else -1)
                     self._knn_classifier = [KNNFaiss(k=5, gpu_idx=gpu_idx) for i in range(len(split_out))]
                 idx_to_take = None
                 if split_out[0].shape[0] > self.cfg.training.max_samples_for_evaluation:

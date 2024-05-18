@@ -1,5 +1,6 @@
 import faiss
 import numpy as np
+import torch
 from scipy import stats
 
 
@@ -17,9 +18,12 @@ class KNNFaiss:
         self.test_label_faiss_output = []
 
     def fitModel(self, train_features, train_labels):
-        self.gpu_index_flat = self.index = faiss.IndexFlatL2(train_features.shape[1])  # build the index
+        if len(train_features.shape) > 1:
+            self.gpu_index_flat = self.index = faiss.IndexFlatL2(train_features.shape[1])  # build the index
+        else:
+            self.gpu_index_flat = self.index = faiss.IndexFlatL2(train_features.shape[0])
         try:
-            res = faiss.StandardGpuResources()
+            res = faiss.StandardGpuResources() if torch.cuda.is_available() else faiss.S
             self.gpu_index_flat = faiss.index_cpu_to_gpu(res, self.gpu_idx, self.gpu_index_flat)
         except AttributeError:
             res = None
@@ -29,5 +33,5 @@ class KNNFaiss:
     def predict(self, test_features):
         distance, test_features_faiss_Index = self.gpu_index_flat.search(test_features, self.k)
         self.test_label_faiss_output = stats.mode(self.train_labels[test_features_faiss_Index], axis=1)[0]
-        self.test_label_faiss_output = np.array(self.test_label_faiss_output.ravel())
+        self.test_label_faisfs_output = np.array(self.test_label_faiss_output.ravel())
         return self.test_label_faiss_output

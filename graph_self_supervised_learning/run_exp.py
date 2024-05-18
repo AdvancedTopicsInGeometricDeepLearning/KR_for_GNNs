@@ -23,8 +23,8 @@ from torch_geometric.transforms import BaseTransform
 import pandas as pd
 from tqdm import tqdm
 
-from graph_self_supervised_learning.dataset import get_dataset
-from graph_self_supervised_learning.model import ExpModel, EModelPhase
+from dataset import get_dataset
+from model import ExpModel, EModelPhase
 from io import StringIO
 
 
@@ -75,7 +75,7 @@ def train_step(cfg: DictConfig,
                step: EModelPhase,
                logger,
                exp_name):
-    device_idx = int(cfg.enviroment.device.split("cuda:")[1])
+    device_idx = int(cfg.enviroment.device.split("cuda:")[1] if "cuda" in cfg.enviroment.device else -1)
     model.set_phase(phase=step)
 
     if step == EModelPhase.TRAIN_EMBEDDING or (not cfg.dataset.pre_calculate_embeddings):
@@ -223,20 +223,26 @@ def train_step(cfg: DictConfig,
 
     checkpoint_callback = ModelCheckpoint(save_top_k=1, monitor="val_loss/loss")
 
-    trainer = pl.Trainer(
-        log_every_n_steps=1,
-        max_epochs=cfg.optimization.epochs,
-        detect_anomaly=True,
-        max_time=datetime.timedelta(hours=12),
-        devices=[device_idx],
-        accelerator="auto",
-        logger=logger,
-        callbacks=[LearningRateMonitor(logging_interval='step'),
-                   EarlyStopping(monitor=f"val_loss/loss", min_delta=0.01,
-                                 patience=cfg.optimization.early_stopping_tolerance, verbose=True, mode="min",
-                                 strict=False),
-                   checkpoint_callback,
-                   ])
+    trainer_params = {
+        'log_every_n_steps': 1,
+        'max_epochs': cfg.optimization.epochs,
+        'detect_anomaly': True,
+        'max_time': datetime.timedelta(hours=12),
+        'devices': [device_idx],
+        'accelerator': "auto",
+        'logger': logger,
+        'callbacks': [LearningRateMonitor(logging_interval='step'),
+                     EarlyStopping(monitor=f"val_loss/loss", min_delta=0.01,
+                                   patience=cfg.optimization.early_stopping_tolerance, verbose=True,
+                                   mode="min",
+                                   strict=False),
+                     checkpoint_callback,
+                     ]
+    }
+    if device_idx < 0:
+        trainer_params.pop('devices')
+
+    trainer = pl.Trainer(**trainer_params)
     trainer.fit(model, full_loader if step == EModelPhase.TRAIN_EMBEDDING else train_loader,
                 (train_loader, val_loader, test_loader))
     try:
@@ -253,7 +259,7 @@ def train_step(cfg: DictConfig,
 
 def main(cfg: DictConfig):
     torch.backends.cudnn.benchmark = True
-    cfg.enviroment.device = f"cuda:{get_free_gpu()}"
+    cfg.enviroment.device = f"cuda:{get_free_gpu()}" if torch.cuda.is_available() else "cpu"
 
     if cfg.enviroment.use_wandb:
         if cfg.enviroment.wandb_project_name == "":
